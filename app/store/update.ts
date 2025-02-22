@@ -6,9 +6,10 @@ import {
 } from "../constant";
 import { getClientConfig } from "../config/client";
 import { createPersistStore } from "../utils/store";
-import { clientUpdate } from "../utils";
 import ChatGptIcon from "../icons/chatgpt.png";
 import Locale from "../locales";
+import { use } from "react";
+import { useAppConfig } from ".";
 import { ClientApi } from "../client/api";
 
 const ONE_MINUTE = 60 * 1000;
@@ -120,7 +121,6 @@ export const useUpdateStore = createPersistStore(
                           icon: `${ChatGptIcon.src}`,
                           sound: "Default",
                         });
-                        clientUpdate();
                       }
                     }
                   });

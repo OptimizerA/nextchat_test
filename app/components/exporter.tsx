@@ -1,5 +1,5 @@
 /* eslint-disable @next/next/no-img-element */
-import { ChatMessage, useAppConfig, useChatStore } from "../store";
+import { ChatMessage, ModelType, useAppConfig, useChatStore } from "../store";
 import Locale from "../locales";
 import styles from "./exporter.module.scss";
 import {
@@ -12,17 +12,13 @@ import {
   showToast,
 } from "./ui-lib";
 import { IconButton } from "./button";
-import {
-  copyToClipboard,
-  downloadAs,
-  getMessageImages,
-  useMobileScreen,
-} from "../utils";
+import { copyToClipboard, downloadAs, useMobileScreen } from "../utils";
 
 import CopyIcon from "../icons/copy.svg";
 import LoadingIcon from "../icons/three-dots.svg";
 import ChatGptIcon from "../icons/chatgpt.png";
 import ShareIcon from "../icons/share.svg";
+import BotIcon from "../icons/bot.png";
 
 import DownloadIcon from "../icons/download.svg";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -32,14 +28,12 @@ import dynamic from "next/dynamic";
 import NextImage from "next/image";
 
 import { toBlob, toPng } from "html-to-image";
+import { DEFAULT_MASK_AVATAR } from "../store/mask";
 
 import { prettyObject } from "../utils/format";
-import { EXPORT_MESSAGE_CLASS_NAME } from "../constant";
+import { EXPORT_MESSAGE_CLASS_NAME, ModelProvider } from "../constant";
 import { getClientConfig } from "../config/client";
-import { type ClientApi, getClientApi } from "../client/api";
-import { getMessageTextContent } from "../utils";
-import { MaskAvatar } from "./mask";
-import clsx from "clsx";
+import { ClientApi } from "../client/api";
 
 const Markdown = dynamic(async () => (await import("./markdown")).Markdown, {
   loading: () => <LoadingIcon />,
@@ -118,10 +112,9 @@ function Steps<
           return (
             <div
               key={i}
-              className={clsx("clickable", styles["step"], {
-                [styles["step-finished"]]: i <= props.index,
-                [styles["step-current"]]: i === props.index,
-              })}
+              className={`${styles["step"]} ${
+                styles[i <= props.index ? "step-finished" : ""]
+              } ${i === props.index && styles["step-current"]} clickable`}
               onClick={() => {
                 props.onStepChange?.(i);
               }}
@@ -139,10 +132,7 @@ function Steps<
 
 export function MessageExporter() {
   const steps = [
-    {
-      name: Locale.Export.Steps.Select,
-      value: "select",
-    },
+
     {
       name: Locale.Export.Steps.Preview,
       value: "preview",
@@ -294,7 +284,7 @@ export function RenderExport(props: {
           id={`${m.role}:${i}`}
           className={EXPORT_MESSAGE_CLASS_NAME}
         >
-          <Markdown content={getMessageTextContent(m)} defaultShow />
+          <Markdown content={m.content} defaultShow />
         </div>
       ))}
     </div>
@@ -313,7 +303,12 @@ export function PreviewActions(props: {
   const onRenderMsgs = (msgs: ChatMessage[]) => {
     setShouldExport(false);
 
-    const api: ClientApi = getClientApi(config.modelConfig.providerName);
+    var api: ClientApi;
+    if (config.modelConfig.model === "gemini-pro") {
+      api = new ClientApi(ModelProvider.GeminiPro);
+    } else {
+      api = new ClientApi(ModelProvider.GPT);
+    }
 
     api
       .share(msgs)
@@ -404,6 +399,22 @@ export function PreviewActions(props: {
       </div>
     </>
   );
+}
+
+function ExportAvatar(props: { avatar: string }) {
+  if (props.avatar === DEFAULT_MASK_AVATAR) {
+    return (
+      <img
+        src={BotIcon.src}
+        width={30}
+        height={30}
+        alt="bot"
+        className="user-avatar"
+      />
+    );
+  }
+
+  return <Avatar avatar={props.avatar} />;
 }
 
 export function ImagePreviewer(props: {
@@ -510,11 +521,11 @@ export function ImagePreviewer(props: {
         messages={props.messages}
       />
       <div
-        className={clsx(styles["preview-body"], styles["default-theme"])}
+        className={`${styles["preview-body"]} ${styles["default-theme"]}`}
         ref={previewRef}
       >
         <div className={styles["chat-info"]}>
-          <div className={clsx(styles["logo"], "no-dark")}>
+          <div className={styles["logo"] + " no-dark"}>
             <NextImage
               src={ChatGptIcon.src}
               alt="logo"
@@ -524,17 +535,14 @@ export function ImagePreviewer(props: {
           </div>
 
           <div>
-            <div className={styles["main-title"]}>NextChat</div>
+            <div className={styles["main-title"]}>Smartpal</div>
             <div className={styles["sub-title"]}>
-              github.com/ChatGPTNextWeb/ChatGPT-Next-Web
+              
             </div>
             <div className={styles["icons"]}>
-              <MaskAvatar avatar={config.avatar} />
+              <ExportAvatar avatar={config.avatar} />
               <span className={styles["icon-space"]}>&</span>
-              <MaskAvatar
-                avatar={mask.avatar}
-                model={session.mask.modelConfig.model}
-              />
+              <ExportAvatar avatar={mask.avatar} />
             </div>
           </div>
           <div>
@@ -558,54 +566,21 @@ export function ImagePreviewer(props: {
         {props.messages.map((m, i) => {
           return (
             <div
-              className={clsx(styles["message"], styles["message-" + m.role])}
+              className={styles["message"] + " " + styles["message-" + m.role]}
               key={i}
             >
               <div className={styles["avatar"]}>
-                {m.role === "user" ? (
-                  <Avatar avatar={config.avatar}></Avatar>
-                ) : (
-                  <MaskAvatar
-                    avatar={session.mask.avatar}
-                    model={m.model || session.mask.modelConfig.model}
-                  />
-                )}
+                <ExportAvatar
+                  avatar={m.role === "user" ? config.avatar : mask.avatar}
+                />
               </div>
 
               <div className={styles["body"]}>
                 <Markdown
-                  content={getMessageTextContent(m)}
+                  content={m.content}
                   fontSize={config.fontSize}
-                  fontFamily={config.fontFamily}
                   defaultShow
                 />
-                {getMessageImages(m).length == 1 && (
-                  <img
-                    key={i}
-                    src={getMessageImages(m)[0]}
-                    alt="message"
-                    className={styles["message-image"]}
-                  />
-                )}
-                {getMessageImages(m).length > 1 && (
-                  <div
-                    className={styles["message-images"]}
-                    style={
-                      {
-                        "--image-count": getMessageImages(m).length,
-                      } as React.CSSProperties
-                    }
-                  >
-                    {getMessageImages(m).map((src, i) => (
-                      <img
-                        key={i}
-                        src={src}
-                        alt="message"
-                        className={styles["message-image-multi"]}
-                      />
-                    ))}
-                  </div>
-                )}
               </div>
             </div>
           );
@@ -624,10 +599,8 @@ export function MarkdownPreviewer(props: {
     props.messages
       .map((m) => {
         return m.role === "user"
-          ? `## ${Locale.Export.MessageFromYou}:\n${getMessageTextContent(m)}`
-          : `## ${Locale.Export.MessageFromChatGPT}:\n${getMessageTextContent(
-              m,
-            ).trim()}`;
+          ? `## ${Locale.Export.MessageFromYou}:\n${m.content}`
+          : `## ${Locale.Export.MessageFromChatGPT}:\n${m.content.trim()}`;
       })
       .join("\n\n");
 

@@ -1,128 +1,31 @@
-import { ApiPath, Google } from "@/app/constant";
+import { Google, REQUEST_TIMEOUT_MS } from "@/app/constant";
+import { ChatOptions, getHeaders, LLMApi, LLMModel, LLMUsage } from "../api";
+import { useAccessStore, useAppConfig, useChatStore } from "@/app/store";
 import {
-  ChatOptions,
-  getHeaders,
-  LLMApi,
-  LLMModel,
-  LLMUsage,
-  SpeechOptions,
-} from "../api";
-import {
-  useAccessStore,
-  useAppConfig,
-  useChatStore,
-  usePluginStore,
-  ChatMessageTool,
-} from "@/app/store";
-import { stream } from "@/app/utils/chat";
+  EventStreamContentType,
+  fetchEventSource,
+} from "@fortaine/fetch-event-source";
+import { prettyObject } from "@/app/utils/format";
 import { getClientConfig } from "@/app/config/client";
-import { GEMINI_BASE_URL } from "@/app/constant";
-
-import {
-  getMessageTextContent,
-  getMessageImages,
-  isVisionModel,
-  getTimeoutMSByModel,
-} from "@/app/utils";
-import { preProcessImageContent } from "@/app/utils/chat";
-import { nanoid } from "nanoid";
-import { RequestPayload } from "./openai";
-import { fetch } from "@/app/utils/stream";
-
+import Locale from "../../locales";
+import { getServerSideConfig } from "@/app/config/server";
+import de from "@/app/locales/de";
 export class GeminiProApi implements LLMApi {
-  path(path: string, shouldStream = false): string {
-    const accessStore = useAccessStore.getState();
-
-    let baseUrl = "";
-    if (accessStore.useCustomConfig) {
-      baseUrl = accessStore.googleUrl;
-    }
-
-    const isApp = !!getClientConfig()?.isApp;
-    if (baseUrl.length === 0) {
-      baseUrl = isApp ? GEMINI_BASE_URL : ApiPath.Google;
-    }
-    if (baseUrl.endsWith("/")) {
-      baseUrl = baseUrl.slice(0, baseUrl.length - 1);
-    }
-    if (!baseUrl.startsWith("http") && !baseUrl.startsWith(ApiPath.Google)) {
-      baseUrl = "https://" + baseUrl;
-    }
-
-    console.log("[Proxy Endpoint] ", baseUrl, path);
-
-    let chatPath = [baseUrl, path].join("/");
-    if (shouldStream) {
-      chatPath += chatPath.includes("?") ? "&alt=sse" : "?alt=sse";
-    }
-
-    return chatPath;
-  }
   extractMessage(res: any) {
     console.log("[Response] gemini-pro response: ", res);
 
-    const getTextFromParts = (parts: any[]) => {
-      if (!Array.isArray(parts)) return "";
-
-      return parts
-        .map((part) => part?.text || "")
-        .filter((text) => text.trim() !== "")
-        .join("\n\n");
-    };
-
-    let content = "";
-    if (Array.isArray(res)) {
-      res.map((item) => {
-        content += getTextFromParts(item?.candidates?.at(0)?.content?.parts);
-      });
-    }
-
     return (
-      getTextFromParts(res?.candidates?.at(0)?.content?.parts) ||
-      content || //getTextFromParts(res?.at(0)?.candidates?.at(0)?.content?.parts) ||
+      res?.candidates?.at(0)?.content?.parts.at(0)?.text ||
       res?.error?.message ||
       ""
     );
   }
-  speech(options: SpeechOptions): Promise<ArrayBuffer> {
-    throw new Error("Method not implemented.");
-  }
-
   async chat(options: ChatOptions): Promise<void> {
     const apiClient = this;
-    let multimodal = false;
-
-    // try get base64image from local cache image_url
-    const _messages: ChatOptions["messages"] = [];
-    for (const v of options.messages) {
-      const content = await preProcessImageContent(v.content);
-      _messages.push({ role: v.role, content });
-    }
-    const messages = _messages.map((v) => {
-      let parts: any[] = [{ text: getMessageTextContent(v) }];
-      if (isVisionModel(options.config.model)) {
-        const images = getMessageImages(v);
-        if (images.length > 0) {
-          multimodal = true;
-          parts = parts.concat(
-            images.map((image) => {
-              const imageType = image.split(";")[0].split(":")[1];
-              const imageData = image.split(",")[1];
-              return {
-                inline_data: {
-                  mime_type: imageType,
-                  data: imageData,
-                },
-              };
-            }),
-          );
-        }
-      }
-      return {
-        role: v.role.replace("assistant", "model").replace("system", "user"),
-        parts: parts,
-      };
-    });
+    const messages = options.messages.map((v) => ({
+      role: v.role.replace("assistant", "model").replace("system", "user"),
+      parts: [{ text: v.content }],
+    }));
 
     // google requires that role in neighboring messages must not be the same
     for (let i = 0; i < messages.length - 1; ) {
@@ -137,11 +40,6 @@ export class GeminiProApi implements LLMApi {
         i++;
       }
     }
-    // if (visionModel && messages.length > 1) {
-    //   options.onError?.(new Error("Multiturn chat is not enabled for models/gemini-pro-vision"));
-    // }
-
-    const accessStore = useAccessStore.getState();
 
     const modelConfig = {
       ...useAppConfig.getState().modelConfig,
@@ -164,33 +62,30 @@ export class GeminiProApi implements LLMApi {
       safetySettings: [
         {
           category: "HARM_CATEGORY_HARASSMENT",
-          threshold: accessStore.googleSafetySettings,
+          threshold: "BLOCK_ONLY_HIGH",
         },
         {
           category: "HARM_CATEGORY_HATE_SPEECH",
-          threshold: accessStore.googleSafetySettings,
+          threshold: "BLOCK_ONLY_HIGH",
         },
         {
           category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-          threshold: accessStore.googleSafetySettings,
+          threshold: "BLOCK_ONLY_HIGH",
         },
         {
           category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-          threshold: accessStore.googleSafetySettings,
+          threshold: "BLOCK_ONLY_HIGH",
         },
       ],
     };
 
-    let shouldStream = !!options.config.stream;
+    console.log("[Request] google payload: ", requestPayload);
+
+    const shouldStream = !!options.config.stream;
     const controller = new AbortController();
     options.onController?.(controller);
     try {
-      // https://github.com/google-gemini/cookbook/blob/main/quickstarts/rest/Streaming_REST.ipynb
-      const chatPath = this.path(
-        Google.ChatPath(modelConfig.model),
-        shouldStream,
-      );
-
+      const chatPath = this.path(Google.ChatPath);
       const chatPayload = {
         method: "POST",
         body: JSON.stringify(requestPayload),
@@ -198,99 +93,103 @@ export class GeminiProApi implements LLMApi {
         headers: getHeaders(),
       };
 
-      const isThinking = options.config.model.includes("-thinking");
       // make a fetch request
       const requestTimeoutId = setTimeout(
         () => controller.abort(),
-        getTimeoutMSByModel(options.config.model),
+        REQUEST_TIMEOUT_MS,
       );
-
       if (shouldStream) {
-        const [tools, funcs] = usePluginStore
-          .getState()
-          .getAsTools(
-            useChatStore.getState().currentSession().mask?.plugin || [],
-          );
-        return stream(
-          chatPath,
-          requestPayload,
-          getHeaders(),
-          // @ts-ignore
-          tools.length > 0
-            ? // @ts-ignore
-              [{ functionDeclarations: tools.map((tool) => tool.function) }]
-            : [],
-          funcs,
-          controller,
-          // parseSSE
-          (text: string, runTools: ChatMessageTool[]) => {
-            // console.log("parseSSE", text, runTools);
-            const chunkJson = JSON.parse(text);
-
-            const functionCall = chunkJson?.candidates
-              ?.at(0)
-              ?.content.parts.at(0)?.functionCall;
-            if (functionCall) {
-              const { name, args } = functionCall;
-              runTools.push({
-                id: nanoid(),
-                type: "function",
-                function: {
-                  name,
-                  arguments: JSON.stringify(args), // utils.chat call function, using JSON.parse
-                },
-              });
-            }
-            return chunkJson?.candidates
-              ?.at(0)
-              ?.content.parts?.map((part: { text: string }) => part.text)
-              .join("\n\n");
-          },
-          // processToolMessage, include tool_calls message and tool call results
-          (
-            requestPayload: RequestPayload,
-            toolCallMessage: any,
-            toolCallResult: any[],
-          ) => {
-            // @ts-ignore
-            requestPayload?.contents?.splice(
-              // @ts-ignore
-              requestPayload?.contents?.length,
-              0,
-              {
-                role: "model",
-                parts: toolCallMessage.tool_calls.map(
-                  (tool: ChatMessageTool) => ({
-                    functionCall: {
-                      name: tool?.function?.name,
-                      args: JSON.parse(tool?.function?.arguments as string),
-                    },
-                  }),
-                ),
-              },
-              // @ts-ignore
-              ...toolCallResult.map((result) => ({
-                role: "function",
-                parts: [
-                  {
-                    functionResponse: {
-                      name: result.name,
-                      response: {
-                        name: result.name,
-                        content: result.content, // TODO just text content...
-                      },
-                    },
-                  },
-                ],
-              })),
-            );
-          },
-          options,
+        let responseText = "";
+        let remainText = "";
+        let streamChatPath = chatPath.replace(
+          "generateContent",
+          "streamGenerateContent",
         );
+        let finished = false;
+
+        let existingTexts: string[] = [];
+        const finish = () => {
+          finished = true;
+          options.onFinish(existingTexts.join(""));
+        };
+
+        // animate response to make it looks smooth
+        function animateResponseText() {
+          if (finished || controller.signal.aborted) {
+            responseText += remainText;
+            finish();
+            return;
+          }
+
+          if (remainText.length > 0) {
+            const fetchCount = Math.max(1, Math.round(remainText.length / 60));
+            const fetchText = remainText.slice(0, fetchCount);
+            responseText += fetchText;
+            remainText = remainText.slice(fetchCount);
+            options.onUpdate?.(responseText, fetchText);
+          }
+
+          requestAnimationFrame(animateResponseText);
+        }
+
+        // start animaion
+        animateResponseText();
+        fetch(streamChatPath, chatPayload)
+          .then((response) => {
+            const reader = response?.body?.getReader();
+            const decoder = new TextDecoder();
+            let partialData = "";
+
+            return reader?.read().then(function processText({
+              done,
+              value,
+            }): Promise<any> {
+              if (done) {
+                console.log("Stream complete");
+                // options.onFinish(responseText + remainText);
+                finished = true;
+                return Promise.resolve();
+              }
+
+              partialData += decoder.decode(value, { stream: true });
+
+              try {
+                let data = JSON.parse(ensureProperEnding(partialData));
+
+                const textArray = data.reduce(
+                  (acc: string[], item: { candidates: any[] }) => {
+                    const texts = item.candidates.map((candidate) =>
+                      candidate.content.parts
+                        .map((part: { text: any }) => part.text)
+                        .join(""),
+                    );
+                    return acc.concat(texts);
+                  },
+                  [],
+                );
+
+                if (textArray.length > existingTexts.length) {
+                  const deltaArray = textArray.slice(existingTexts.length);
+                  existingTexts = textArray;
+                  remainText += deltaArray.join("");
+                }
+              } catch (error) {
+                // console.log("[Response Animation] error: ", error,partialData);
+                // skip error message when parsing json
+              }
+
+              return reader.read().then(processText);
+            });
+          })
+          .catch((error) => {
+            console.error("Error:", error);
+          });
       } else {
         const res = await fetch(chatPath, chatPayload);
         clearTimeout(requestTimeoutId);
+
         const resJson = await res.json();
+
         if (resJson?.promptFeedback?.blockReason) {
           // being blocked
           options.onError?.(
@@ -300,8 +199,8 @@ export class GeminiProApi implements LLMApi {
             ),
           );
         }
-        const message = apiClient.extractMessage(resJson);
-        options.onFinish(message, res);
+        const message = this.extractMessage(resJson);
+        options.onFinish(message);
       }
     } catch (e) {
       console.log("[Request] failed to make a chat request", e);
@@ -314,4 +213,14 @@ export class GeminiProApi implements LLMApi {
   async models(): Promise<LLMModel[]> {
     return [];
   }
+  path(path: string): string {
+    return "/api/google/" + path;
+  }
+}
+
+function ensureProperEnding(str: string) {
+  if (str.startsWith("[") && !str.endsWith("]")) {
+    return str + "]";
+  }
+  return str;
 }
